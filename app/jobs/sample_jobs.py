@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict, Any
 import random
+from dateutil import parser
 
 logger = logging.getLogger(__name__)
 
@@ -297,14 +298,13 @@ async def scrape_orienteering_data_job():
         
         logger.info(f"Found {len(games_data)} games in match_ref collection")
         
-        # Clear all existing records in match_result collection
+        # Get match_result collection reference
         match_result_collection = db.match_result
-        delete_result = await match_result_collection.delete_many({})
-        logger.info(f"Cleared {delete_result.deleted_count} existing records from match_result collection")
         
         total_runners_scraped = 0
         games_processed = 0
-        all_scraped_data = []
+        total_records_cleared = 0
+        total_records_inserted = 0
         
         for game_info in games_data:
             try:
@@ -312,6 +312,7 @@ async def scrape_orienteering_data_job():
                 game_name = game_info.get('name', f'Game_{game_id}')
                 groups = game_info.get('groups', [])
                 group_ids = [group.get('groupId') for group in groups if group.get('groupId')]
+                game_time = game_info.get('time')
                 
                 if not game_id:
                     logger.warning("Game entry missing gameId, skipping")
@@ -321,33 +322,69 @@ async def scrape_orienteering_data_job():
                     logger.warning(f"No valid group IDs found for game '{game_name}', skipping")
                     continue
                 
+                # Check if game time is in the past
+                if game_time:
+                    try:
+                        # Parse the time field (assuming it's in ISO format or timestamp)
+                        if isinstance(game_time, str):
+                            game_datetime = parser.parse(game_time)
+                        elif isinstance(game_time, (int, float)):
+                            # Assume it's a timestamp
+                            game_datetime = datetime.fromtimestamp(game_time)
+                        else:
+                            # If it's already a datetime object
+                            game_datetime = game_time
+                        
+                        # Ensure both datetimes are timezone-aware for proper comparison
+                        if game_datetime.tzinfo is not None:
+                            # Game time is timezone-aware, make current time UTC-aware
+                            from datetime import timezone
+                            current_time = datetime.now(timezone.utc)
+                        else:
+                            # Game time is timezone-naive, use local time
+                            current_time = datetime.now()
+                        
+                        if game_datetime < current_time:
+                            logger.info(f"Skipping game '{game_name}' ({game_id}) - game time {game_datetime} is in the past")
+                            continue
+                        else:
+                            logger.info(f"Game '{game_name}' ({game_id}) scheduled for {game_datetime} - proceeding with scraping")
+                    except Exception as e:
+                        logger.warning(f"Could not parse time field for game '{game_name}' ({game_id}): {e}. Proceeding with scraping.")
+                else:
+                    logger.info(f"No time field found for game '{game_name}' ({game_id}) - proceeding with scraping")
+                
                 logger.info(f"Processing game '{game_name}' ({game_id}) with {len(group_ids)} groups")
                 
-                # Fetch data for this game
+                # Fetch data for this game first
                 game_runners = await _fetch_data_for_game_async(game_id, group_ids, BASE_URL)
                 
                 if game_runners:
+                    # Clear existing records for this specific gameId only after successful fetch
+                    delete_result = await match_result_collection.delete_many({"gameId": game_id})
+                    total_records_cleared += delete_result.deleted_count
+                    logger.info(f"Cleared {delete_result.deleted_count} existing records for game '{game_name}' ({game_id})")
+                    
                     # Add metadata to each runner record
                     for runner in game_runners:
                         runner['gameId'] = game_id
                         runner['gameName'] = game_name
                         runner['scrapedAt'] = datetime.now()
                     
-                    all_scraped_data.extend(game_runners)
+                    # Insert the new data for this game immediately
+                    insert_result = await match_result_collection.insert_many(game_runners)
+                    total_records_inserted += len(insert_result.inserted_ids)
+                    logger.info(f"Inserted {len(insert_result.inserted_ids)} runner records for game '{game_name}' ({game_id})")
+                    
                     total_runners_scraped += len(game_runners)
                     games_processed += 1
-                    logger.info(f"Fetched {len(game_runners)} runners for game '{game_name}'")
+                    logger.info(f"Successfully processed game '{game_name}' with {len(game_runners)} runners")
                 else:
-                    logger.warning(f"No data fetched for game '{game_name}'")
+                    logger.warning(f"No data fetched for game '{game_name}' - keeping existing records")
                     
             except Exception as e:
                 logger.error(f"Error processing game {game_info.get('name', 'Unknown')}: {e}")
                 continue
-        
-        # Insert all scraped data into match_result collection
-        if all_scraped_data:
-            insert_result = await match_result_collection.insert_many(all_scraped_data)
-            logger.info(f"Inserted {len(insert_result.inserted_ids)} runner records into match_result collection")
         
         logger.info(f"Scraping job completed - {games_processed} games processed, {total_runners_scraped} total runners scraped")
         
@@ -355,8 +392,8 @@ async def scrape_orienteering_data_job():
             "status": "completed",
             "games_processed": games_processed,
             "total_runners_scraped": total_runners_scraped,
-            "records_cleared": delete_result.deleted_count,
-            "records_inserted": len(all_scraped_data),
+            "records_cleared": total_records_cleared,
+            "records_inserted": total_records_inserted,
             "timestamp": datetime.now().isoformat()
         }
         
