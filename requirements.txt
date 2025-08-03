@@ -44,7 +44,7 @@ charset-normalizer==3.4.2
 urllib3==2.5.0
 
 # Allow flexible versions for packages with conflicts
-email-validator>=1.0.5,<2.0.0
+email-validator>=2.0.0
 h11>=0.14.0
 httpcore>=1.0.0
 
