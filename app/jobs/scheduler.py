@@ -128,7 +128,7 @@ class JobScheduler:
             self.scheduler.add_job(
                 scrape_orienteering_data_job,
                 'interval',
-                minutes=1,
+                minutes=60,
                 id='scrape_orienteering_data',
                 name='Orienteering Data Scraper (Every 1 minute)',
                 replace_existing=True
